@@ -12,8 +12,8 @@ From Codex, ask it to run `skill-installer` for this repo. Example prompt:
 
 ```text
 $skill-installer Install these skills from GitHub repo `jdamp/codex-skills`:
-- `git-worktree-manager`
-- `github-issue-creator`
+- `skills/git-worktree-manager`
+- `skills/github-issue-creator`
 ```
 
 Restart Codex after installation so the new skills are loaded.
