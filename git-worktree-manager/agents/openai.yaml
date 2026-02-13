@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Worktree Manager"
+  short_description: "Parallel worktrees for Codex CLI + VS Code"
+  default_prompt: "Use $git-worktree-manager to create a parallel worktree, open it in VS Code, and start a second Codex CLI session."

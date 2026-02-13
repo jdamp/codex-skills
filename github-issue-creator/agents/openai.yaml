@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Issue Creator"
+  short_description: "Convert raw notes into GitHub issue reports"
+  default_prompt: "Use $github-issue-creator to turn messy bug notes, logs, or screenshots into structured issue markdown in /issues and optionally publish with gh."

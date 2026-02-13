@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  worktreectl create <branch> [--base <base>] [--path <path>] [--remote] [--open] [--editor <auto|code>] [--print-open-cmd]
+  worktreectl list
+  worktreectl open <path-or-branch> [--editor <auto|code>] [--print-open-cmd]
+  worktreectl remove <path-or-branch> [--force]
+  worktreectl prune
+  worktreectl repair
+
+Examples:
+  worktreectl create feature/payments-redesign
+  worktreectl create feature/payments-redesign --open
+  worktreectl create fix/login-loop --remote
+  worktreectl create chore/deps --base develop --path ../repo-deps
+  worktreectl open feature/payments-redesign --editor code
+  worktreectl list
+  worktreectl remove feature/payments-redesign
+  worktreectl prune
+EOF
+}
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_repo() {
+  local root
+  if ! root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    die "Not inside a git repository."
+  fi
+  echo "$root"
+}
+
+branch_exists_local() {
+  local branch="$1"
+  git show-ref --verify --quiet "refs/heads/$branch"
+}
+
+branch_exists_remote() {
+  local branch="$1"
+  git show-ref --verify --quiet "refs/remotes/origin/$branch"
+}
+
+branch_checked_out() {
+  local branch="$1"
+  git worktree list --porcelain | grep -Fxq "branch refs/heads/$branch"
+}
+
+resolve_target_path() {
+  local target="$1"
+  if [[ -d "$target" ]]; then
+    (cd "$target" && pwd -P)
+    return 0
+  fi
+  local resolved
+  resolved="$(worktree_path_for_branch "$target")"
+  [[ -n "$resolved" ]] || return 1
+  (cd "$resolved" && pwd -P)
+}
+
+select_editor() {
+  local requested="$1"
+  case "$requested" in
+    auto)
+      if command -v code >/dev/null 2>&1; then
+        echo "code"
+      else
+        echo ""
+      fi
+      ;;
+    code)
+      command -v "$requested" >/dev/null 2>&1 || die "Editor command not found: $requested"
+      echo "$requested"
+      ;;
+    *)
+      die "Unsupported editor '$requested'. Use auto or code."
+      ;;
+  esac
+}
+
+open_path_in_editor() {
+  local path="$1"
+  local editor="$2"
+  local print_only="$3"
+  local editor_cmd
+
+  editor_cmd="$(select_editor "$editor")"
+  if [[ -z "$editor_cmd" ]]; then
+    echo "No supported editor command found (tried: code)."
+    echo "Worktree path: $path"
+    return 0
+  fi
+
+  if [[ "$print_only" -eq 1 ]]; then
+    echo "Open command: $editor_cmd \"$path\""
+    return 0
+  fi
+
+  "$editor_cmd" "$path"
+  echo "Opened worktree in editor: $path"
+}
+
+sanitize_branch() {
+  local branch="$1"
+  echo "$branch" | tr '/:@ ' '----' | tr -cd 'a-zA-Z0-9._-'
+}
+
+default_path_for_branch() {
+  local repo_root="$1"
+  local branch="$2"
+  local repo_name safe_branch parent
+
+  repo_name="$(basename "$repo_root")"
+  safe_branch="$(sanitize_branch "$branch")"
+  parent="$(dirname "$repo_root")"
+  echo "$parent/${repo_name}-wt-${safe_branch}"
+}
+
+worktree_path_for_branch() {
+  local branch="$1"
+  git worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    /^worktree / { p = substr($0, 10) }
+    /^branch / { if (substr($0, 8) == b) { print p; exit } }
+  '
+}
+
+cmd_create() {
+  local repo_root branch base path use_remote start_point do_open editor print_open_cmd
+  local -a git_cmd
+
+  repo_root="$(require_repo)"
+  branch="${1:-}"
+  shift || true
+  [[ -n "$branch" ]] || die "Missing <branch> for create."
+
+  base="main"
+  path=""
+  use_remote=0
+  do_open=0
+  editor="auto"
+  print_open_cmd=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        [[ $# -ge 2 ]] || die "--base requires a value."
+        base="$2"
+        shift 2
+        ;;
+      --path)
+        [[ $# -ge 2 ]] || die "--path requires a value."
+        path="$2"
+        shift 2
+        ;;
+      --remote)
+        use_remote=1
+        shift
+        ;;
+      --open)
+        do_open=1
+        shift
+        ;;
+      --editor)
+        [[ $# -ge 2 ]] || die "--editor requires a value."
+        editor="$2"
+        shift 2
+        ;;
+      --print-open-cmd)
+        print_open_cmd=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown create option: $1"
+        ;;
+    esac
+  done
+
+  if [[ -z "$path" ]]; then
+    path="$(default_path_for_branch "$repo_root" "$branch")"
+  fi
+
+  [[ ! -e "$path" ]] || die "Target path already exists: $path"
+
+  if branch_exists_local "$branch"; then
+    branch_checked_out "$branch" && die "Branch '$branch' is already checked out in a worktree."
+    git_cmd=(git worktree add "$path" "$branch")
+  elif [[ "$use_remote" -eq 1 ]] || branch_exists_remote "$branch"; then
+    branch_exists_remote "$branch" || die "Remote branch 'origin/$branch' does not exist."
+    git_cmd=(git worktree add --track -b "$branch" "$path" "origin/$branch")
+  else
+    if branch_exists_local "$base"; then
+      start_point="$base"
+    elif branch_exists_remote "$base"; then
+      start_point="origin/$base"
+    else
+      die "Base branch '$base' does not exist locally or on origin."
+    fi
+    git_cmd=(git worktree add -b "$branch" "$path" "$start_point")
+  fi
+
+  "${git_cmd[@]}"
+  echo "Created worktree: $path"
+  if [[ "$do_open" -eq 1 ]]; then
+    open_path_in_editor "$path" "$editor" "$print_open_cmd"
+  fi
+}
+
+cmd_list() {
+  require_repo >/dev/null
+  git worktree list
+}
+
+cmd_open() {
+  local target editor print_open_cmd path
+
+  require_repo >/dev/null
+  target="${1:-}"
+  shift || true
+  [[ -n "$target" ]] || die "Missing <path-or-branch> for open."
+
+  editor="auto"
+  print_open_cmd=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --editor)
+        [[ $# -ge 2 ]] || die "--editor requires a value."
+        editor="$2"
+        shift 2
+        ;;
+      --print-open-cmd)
+        print_open_cmd=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown open option: $1"
+        ;;
+    esac
+  done
+
+  path="$(resolve_target_path "$target")" || die "Could not resolve '$target' to a worktree path."
+  open_path_in_editor "$path" "$editor" "$print_open_cmd"
+}
+
+cmd_remove() {
+  local repo_root target force path
+  local -a git_cmd
+
+  repo_root="$(require_repo)"
+  target="${1:-}"
+  shift || true
+  [[ -n "$target" ]] || die "Missing <path-or-branch> for remove."
+
+  force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown remove option: $1"
+        ;;
+    esac
+  done
+
+  if [[ -d "$target" ]]; then
+    path="$target"
+  else
+    path="$(worktree_path_for_branch "$target")"
+  fi
+
+  [[ -n "${path:-}" ]] || die "Could not resolve '$target' to a worktree path."
+  [[ "$(cd "$path" && pwd -P)" != "$repo_root" ]] || die "Refusing to remove the primary worktree."
+
+  git_cmd=(git worktree remove)
+  [[ "$force" -eq 1 ]] && git_cmd+=(--force)
+  git_cmd+=("$path")
+  "${git_cmd[@]}"
+  echo "Removed worktree: $path"
+}
+
+cmd_prune() {
+  require_repo >/dev/null
+  git worktree prune --verbose
+}
+
+cmd_repair() {
+  require_repo >/dev/null
+  git worktree repair
+}
+
+main() {
+  local command
+  command="${1:-}"
+  shift || true
+
+  case "$command" in
+    create) cmd_create "$@" ;;
+    list) cmd_list "$@" ;;
+    open) cmd_open "$@" ;;
+    remove) cmd_remove "$@" ;;
+    prune) cmd_prune "$@" ;;
+    repair) cmd_repair "$@" ;;
+    -h|--help|"") usage ;;
+    *) die "Unknown command: $command" ;;
+  esac
+}
+
+main "$@"
